@@ -65,3 +65,156 @@ def get_answer(input):
     """
     response = palm.generate_text(**defaults, prompt=prompt)
     return response.result
+
+def format_names_with_ampersand(names):
+    """
+    Formats a list of names with an ampersand (&) between the last two names.
+
+    Args:
+        names (list): A list of names to be formatted.
+
+    Returns:
+        str: Formatted names as a string.
+    """
+    if len(names) == 0:
+        return ""  
+    elif len(names) == 1:
+        return names[0]  
+    else:
+        
+        formatted_names = ", ".join(names[:-1]) + " & " + names[-1]
+        return formatted_names 
+
+def extract_query_and_return_key(input_query_result):
+    """
+    Extracts a cleaned query and the extracted string from a given input query result.
+
+    Args:
+        input_query_result (str): The input query result string.
+
+    Returns:
+        tuple: A tuple containing the cleaned query string and the extracted string.
+    """
+    slash_n_pattern = r'[ \n]+' 
+    ret_pattern = r'RETURN\s+(.*)'  
+    replacement = ' '  
+    cleaned_query = re.sub(slash_n_pattern, replacement, input_query_result)
+
+    if cleaned_query:
+       
+        match = re.search(ret_pattern, cleaned_query)
+        if match:
+            extracted_string = match.group(1)  
+        else:
+            extracted_string = ""  
+    else:
+        extracted_string = ""  
+
+    return cleaned_query, extracted_string  
+
+def run_cypher_on_neo4j(inp_query, inp_key):
+    """
+    Runs a Cypher query on a Neo4j database, extracts values using the given key, and formats the output.
+
+    Args:
+        inp_query (str): The Cypher query to run on the Neo4j database.
+        inp_key (str): The key to extract values from the query result.
+
+    Returns:
+        str: Formatted output containing the extracted values.
+    """
+    out_list = []  # Initialize an empty list to store extracted values
+
+    # Establish a connection to the Neo4j database using the driver
+    driver = GraphDatabase.driver("bolt://localhost:7687", auth=("username", "password"))
+
+    # Open a session to run the Cypher query and process the result
+    with driver.session() as session:
+        result = session.run(inp_query)  # Execute the Cypher query
+        for record in result:
+            out_list.append(record[inp_key])  # Extract and store values using the provided key
+
+    driver.close()  # Close the database connection
+
+    if len(out_list) > 1:
+        # If there are multiple values, format them using the 'format_names_with_ampersand' function
+        return format_names_with_ampersand(out_list)
+    else:
+        # If there's only one value, return it directly
+        return out_list[0]
+
+def generate_and_exec_cypher(input_query):
+    """
+    Generates and executes a Cypher query based on the input query, extracts values, and returns formatted output.
+
+    Args:
+        input_query (str): The input query for generating the Cypher query.
+
+    Returns:
+        str: Formatted output containing the extracted values from the executed Cypher query.
+    """
+    # Generate a Cypher query and extract key using the 'get_answer' and 'extract_query_and_return_key' functions
+    gen_query, gen_key = extract_query_and_return_key(get_answer(input_query))
+
+    # Execute the generated Cypher query and extract values using the 'run_cypher_on_neo4j' function
+    return run_cypher_on_neo4j(gen_query, gen_key)
+
+from gtts import gTTS  # Import the gTTS module for text-to-speech conversion
+
+def transcribe(audio):
+    """
+    Transcribes audio, detects language, generates and executes Cypher query,
+    and saves a text-to-speech audio file.
+
+    Args:
+        audio (str): Path to the audio file for transcription.
+
+    Returns:
+        list: A list containing the result text, Cypher query result, and audio file path.
+    """
+    language = 'en'  # Language for text-to-speech conversion
+    result_text = ''  # Initialize variable to store transcription result
+    out_result = ''  # Initialize variable to store Cypher query result
+    if audio:
+        audio = whisper.load_audio(audio)  # Load audio using whisper library
+        audio = whisper.pad_or_trim(audio)  # Pad or trim audio to a consistent length
+
+        mel = whisper.log_mel_spectrogram(audio).to(model.device)  # Convert audio to mel spectrogram
+
+        _, probs = model.detect_language(mel)  # Detect the language of the audio
+
+        options = whisper.DecodingOptions()
+        result = whisper.decode(model, mel, options)  # Decode the mel spectrogram to text
+        result_text = result.text  # Get the transcribed text
+        if result_text:
+            out_result = generate_and_exec_cypher(result_text)  # Generate and execute Cypher query
+
+            # Convert the Cypher query result to an audio file using gTTS
+            audioobj = gTTS(text=out_result, lang=language, slow=False)
+            audioobj.save("Temp.mp3")  # Save the generated audio as "Temp.mp3"
+
+    # Return the result text, Cypher query result, and audio file path in a list
+    return [result_text, out_result, "Temp.mp3"]
+
+model = whisper.load_model("base")
+model.device
+!ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 10 -q:a 9 -acodec libmp3lame Temp.mp3
+
+driver = GraphDatabase.driver("Neo4j Bolt IP Address",
+                              auth=("user name",
+                                    "password"))
+output_1 = gr.Textbox(label="Speech to Text")
+output_2 = gr.Textbox(label="Google PaLM 2 Model Output along with Neo4j")
+output_3 = gr.Audio("Temp.mp3")
+
+gr.Interface(
+    title = 'Google PaLM2 Model with Whisper & ASR Gradio Web UI',
+    fn = transcribe,
+    inputs=[
+        gr.inputs.Audio(source="microphone", type="filepath")
+    ],
+
+    outputs=[
+        output_1,  output_2, output_3
+    ],
+    live=True).launch(debug=True)
